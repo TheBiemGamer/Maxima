@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     core::auth::storage::{AuthError, LockedAuthStorage, TokenError},
-    rtm::proto::{LoginRequestV3, PlatformV1, PresenceSubscribeV1, PresenceV1, UserType},
+    rtm::proto::{LoginRequestV3, PlatformV1, PresenceSubscribeAllFriendsV1, PresenceV1, UserType},
 };
 
 macro_rules! send_and_forget_rtm_request {
@@ -287,12 +287,9 @@ impl RtmClient {
         .await
     }
 
-    /// Subscribe to a list of user IDs' presences
-    pub async fn subscribe(&mut self, players: &Vec<String>) -> Result<(), RtmError> {
-        send_and_forget_rtm_request!(self.conn_man, PresenceSubscribe, PresenceSubscribeV1, {
-            players: players.iter().map(|id| Player{ player_id: id.to_owned(), product_id: String::from("origin"), }).collect()
-        })
-        .await
+    /// Subscribe to all friends
+    pub async fn subscribe(&mut self) -> Result<(), RtmError> {
+        send_and_forget_rtm_request!(self.conn_man, PresenceSubscribeAllFriends, PresenceSubscribeAllFriendsV1, {}).await
     }
 
     pub async fn session_cleanup(&mut self, session_key: &str) -> Result<(), RtmError> {
