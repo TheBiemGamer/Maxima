@@ -4,6 +4,7 @@ package eadp.rtm;
 import "common.proto";
 import "requests.proto";
 import "responses.proto";
+import "notification.proto";
 
 message Communication {
     CommunicationV1 v1 = 1;
@@ -16,6 +17,7 @@ message CommunicationV1 {
         PresenceSubscribeV1 presenceSubscribe = 2;
         PresenceUpdateV1 presenceUpdate = 5;
         PresenceV1 presence = 7;
+        NotificationV1 notification = 8;
         ErrorV1 error = 13;
         ReconnectRequestV1 reconnectRequest = 14;
         SuccessV1 success = 15;

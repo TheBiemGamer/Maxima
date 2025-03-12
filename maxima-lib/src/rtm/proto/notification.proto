@@ -1,0 +1,30 @@
+syntax = "proto3";
+package eadp.rtm;
+
+import "common.proto";
+import "responses.proto";
+import "chat.proto";
+
+message NotificationV1 {
+    string type = 1;
+    string payload = 2;
+}
+
+enum SessionNotificationTypeV1 {
+    NONE_SESSION_NOTIFICATION_TYPE = 0;
+    DEFAULT = 1;
+    FORCE_DISCONNECT = 2;
+    USER_LOGGED_IN = 3;
+    USER_LOGGED_OUT = 4;
+    CHAT_CHANNEL_UPDATE = 5;
+}
+
+// UNFINISHED
+message SessionNotificationV1 {
+    SessionNotificationTypeV1 type = 1;
+    string message = 2;
+    PlatformV1 platform = 3;
+    int32 sessionLimitRemaining = 4;
+    repeated SessionV1 connectedSessions = 5;
+    ChatChannelUpdateV1 chatChannelUpdate = 6;
+}

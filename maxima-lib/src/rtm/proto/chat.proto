@@ -1,0 +1,8 @@
+syntax = "proto3";
+package eadp.rtm;
+
+message ChatChannelUpdateV1 {
+    string channelId = 1;
+    string lastReadTimestamp = 2;
+    string customProperties = 3;
+}
