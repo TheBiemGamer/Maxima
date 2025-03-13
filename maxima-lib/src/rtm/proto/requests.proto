@@ -7,6 +7,23 @@ message PresenceSubscribeV1 {
     repeated Player players = 2;
 }
 
+message WorldChatChannelsRequestV1 {
+    string worldName = 1;
+	int32 fromIndex = 2;
+	int32 pageSize = 3;
+}
+
+message ChatChannelsRequestV2 {
+	bool includeLastMessageInfo = 1;
+	bool includeUnreadMessageInfo = 2;
+	repeated int32 unreadMessageTypes = 3;
+	bool includeCustomProperties = 4;
+	int32 inviteChannelScope = 5;
+	repeated int32 channelTypes = 6;
+}
+
+message WorldChatConfigurationRequestV1 {}
+
 message LoginRequestV3 {
 	string token = 1;
 

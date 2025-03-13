@@ -2,6 +2,7 @@ syntax = "proto3";
 package eadp.rtm;
 
 import "common.proto";
+import "world_chat.proto";
 
 message SessionV1 {
     string sessionKey = 1;
@@ -26,8 +27,18 @@ message ErrorV1 {
 	string errorMessage = 2;
 
 	oneof body {
+		ValidationErrorV1 validationError = 4;
 		LoginErrorV1 loginError = 7;
 	}
+}
+
+message FieldViolationV1 {
+	string fieldName = 1;
+	string violationMessage = 2;
+}
+
+message ValidationErrorV1 {
+	repeated FieldViolationV1 fieldViolation = 1;
 }
 
 message LoginErrorV1 {
@@ -49,4 +60,29 @@ message PresenceV1 {
 	optional string sessionKey = 8;
 	optional string clientVersion = 9;
 	optional PlatformV1 platform = 10;
+}
+
+message WorldChatResponseV1 {
+	string channelId = 1;
+	int32 remainingDailyShardSwitchCount = 2;
+	int32 shardIndex = 3;
+	string worldName = 4;
+	string previousChannelId = 5;
+	int32 previousShardIndex = 6;
+	repeated ChannelMuteListV1 muteList = 7;
+	string channelName = 8;
+}
+
+message WorldChatConfigurationResponseV1 {
+	int32 remainingDailyShardSwitchCount = 1;
+	int32 maxShards = 2;
+	int32 maxShardSize = 3;
+	int32 maxWorldNamesPerGame = 4;
+	int32 maxDailyShardSwitchCount = 5;
+}
+
+message WorldChatChannelsResponseV1 {
+	string worldName = 1;
+	repeated WorldChatShard shard = 2;
+	int32 totalShardCount = 3;
 }

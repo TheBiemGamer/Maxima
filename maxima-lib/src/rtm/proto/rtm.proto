@@ -22,6 +22,12 @@ message CommunicationV1 {
         ReconnectRequestV1 reconnectRequest = 14;
         SuccessV1 success = 15;
         HeartbeatV1 heartbeat = 20;
+        WorldChatResponseV1 worldChatResponse = 22;
+        WorldChatConfigurationRequestV1 worldChatConfigurationRequestV1 = 26;
+        WorldChatConfigurationResponseV1 worldChatConfigurationResponse = 27;
+        WorldChatChannelsRequestV1 worldChatChannelsRequestV1 = 28;
+        WorldChatChannelsResponseV1 worldChatChannelsResponse = 29;
+        ChatChannelsRequestV2 chatChannelsRequestV2 = 42;
         LoginRequestV3 loginRequestV3 = 46;
         SessionCleanupV1 sessionCleanupV1 = 49;
         PresenceSubscribeAllFriendsV1 presenceSubscribeAllFriends = 51;

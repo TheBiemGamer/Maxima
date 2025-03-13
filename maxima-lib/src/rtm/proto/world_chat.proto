@@ -1,0 +1,12 @@
+syntax = "proto3";
+package eadp.rtm;
+
+import "common.proto";
+
+message WorldChatShard {
+
+}
+
+message ChannelMuteListV1 { 
+
+}
