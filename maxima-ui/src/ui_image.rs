@@ -208,10 +208,8 @@ impl UIImageCache {
 
         'outer: loop {
             match commander.try_recv() {
-                Err(error) => {
-                    if error == std::sync::mpsc::TryRecvError::Disconnected {
-                        break 'outer;
-                    }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    break 'outer;
                 }
                 Ok(request) => match request {
                     UIImageCacheLoaderCommand::ProvideRemote(needle, target) => {
@@ -254,6 +252,7 @@ impl UIImageCache {
                         cache.lock().unwrap().insert(needle, None);
                     }
                 },
+                _ => {}
             }
         }
         info!("Shutting down image loader thread");

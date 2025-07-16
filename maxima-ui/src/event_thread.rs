@@ -1,5 +1,5 @@
 use egui::Context;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use crate::bridge_thread::BackendError;
 use log::info;
@@ -99,15 +99,11 @@ impl EventThread {
                 }
             }
 
-            let request = rtm_cmd_listener.try_recv();
-            if request.is_err() {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                continue;
-            }
-
-            match request? {
-                MaximaEventRequest::SubscribeToFriendPresence => {}
-                MaximaEventRequest::ShutdownRequest => break 'outer Ok(()),
+            match rtm_cmd_listener.try_recv() {
+                Ok(MaximaEventRequest::SubscribeToFriendPresence) => {}
+                Ok(MaximaEventRequest::ShutdownRequest) |
+                Err(TryRecvError::Disconnected) => break 'outer Ok(()),
+                Err(TryRecvError::Empty) => {}
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
