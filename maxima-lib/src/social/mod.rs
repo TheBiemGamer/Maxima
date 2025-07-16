@@ -34,6 +34,7 @@ pub mod eadp {
         pub mod presence {
             pub mod v1 {
                 tonic::include_proto!("eadp.social.presence.v1");
+
             }
         }
     }
@@ -45,4 +46,6 @@ pub mod client;
 pub enum SocialError {
     #[error(transparent)]
     Recv(#[from] std::sync::mpsc::RecvError),
+    #[error(transparent)]
+    TonicStatus(#[from] tonic::Status),
 }
