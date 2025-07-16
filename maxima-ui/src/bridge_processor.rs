@@ -133,11 +133,15 @@ pub fn frontend_processor(app: &mut MaximaEguiApp, ctx: &egui::Context) {
                 }
                 ctx.request_repaint();
             }
-            Err(TryRecvError::Disconnected) => {
-                app.critical_error = Some(BackendError::ChannelDisconnected);
+            Err(variant) => {
+                match variant {
+                    TryRecvError::Empty => {}
+                    TryRecvError::Disconnected => {
+                        app.critical_error = Some(BackendError::ChannelDisconnected);
+                    }
+                }
                 break 'outer;
             }
-            _ => {}
         }
     }
 }
