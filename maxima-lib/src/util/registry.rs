@@ -50,6 +50,9 @@ pub enum RegistryError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Native(#[from] NativeError),
+    #[cfg(windows)]
+    #[error(transparent)]
+    WidestringContainsNul(#[from] widestring::error::ContainsNul<u16>),
 
     #[error("registry key `{0}` not found")]
     Key(String),
@@ -62,16 +65,13 @@ pub enum RegistryError {
     #[error("invalid qrc protocol")]
     InvalidQrcProtocol,
 
-    #[cfg(target_os = "linux")]
+    // Linux
     #[error("xdg-mime command is not available. Please install xdg-utils")]
     XdgMime,
-    #[cfg(target_os = "linux")]
     #[error("Failed to set MIME type association for {type}: {error}")]
     MimeSet { r#type: String, error: String },
-    #[cfg(target_os = "linux")]
     #[error("failed to query mime status")]
     XdgQueryFailed,
-    #[cfg(target_os = "linux")]
     #[error("QRC protocol is not registered")]
     QrcUnregistered,
 }
@@ -114,7 +114,7 @@ async fn read_reg_key(path: &str) -> Result<Option<String>, RegistryError> {
         unsafe {
             if RegOpenKeyExW(
                 hkey,
-                U16CString::from_str(sub_key).unwrap().as_ptr(),
+                U16CString::from_str(sub_key)?.as_ptr(),
                 0,
                 KEY_QUERY_VALUE,
                 &mut handle,
@@ -128,7 +128,7 @@ async fn read_reg_key(path: &str) -> Result<Option<String>, RegistryError> {
 
             if RegQueryValueExW(
                 handle,
-                U16CString::from_str(value_name).unwrap().as_ptr(),
+                U16CString::from_str(value_name)?.as_ptr(),
                 ptr::null_mut(),
                 dw_type,
                 ptr::null_mut(),
@@ -153,7 +153,7 @@ async fn read_reg_key(path: &str) -> Result<Option<String>, RegistryError> {
             let mut buf: Vec<u16> = vec![0; dw_size as usize / 2];
             if RegQueryValueExW(
                 handle,
-                U16CString::from_str(value_name).unwrap().as_ptr(),
+                U16CString::from_str(value_name)?.as_ptr(),
                 ptr::null_mut(),
                 dw_type,
                 buf.as_mut_ptr() as *mut u8,
@@ -341,12 +341,12 @@ pub fn set_up_registry() -> Result<(), RegistryError> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn set_up_registry() -> Result<()> {
+pub fn set_up_registry() -> Result<(), RegistryError> {
     use std::process::Command;
 
     use log::warn;
 
-    let bin = bootstrap_path();
+    let bin = bootstrap_path()?;
 
     if !bin.try_exists()? {
         warn!(
@@ -457,17 +457,16 @@ fn verify_protocol_handler(protocol: &str) -> Result<bool, RegistryError> {
     }
 
     let expected = format!("maxima-{}.desktop\n", protocol);
-    return Ok(output_str == expected);
+    Ok(output_str == expected)
 }
 
 #[cfg(target_os = "macos")]
-fn verify_protocol_handler(protocol: &str) -> Result<bool> {
+fn verify_protocol_handler(protocol: &str) -> Result<bool, RegistryError> {
     use std::process::Command;
 
     let output = Command::new("open")
         .args([&format!("{}://", protocol), "--args", "--noop"])
-        .output()
-        .expect("Failed to call open");
+        .output()?;
 
     Ok(output.status.success())
 }

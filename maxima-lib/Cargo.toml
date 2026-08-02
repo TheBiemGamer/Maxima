@@ -29,6 +29,7 @@ hex = "0.4.3"
 lazy_static = "1.4.0"
 reqwest = { version = "0.11.18", features = ["stream", "rustls-tls", "gzip", "json"], default-features = false }
 base64 = "0.21.2"
+base62 = "2.2.0"
 log = "0.4.19"
 enable-ansi-support = "0.2.1"
 chrono = "0.4.26"
@@ -41,7 +42,7 @@ sysinfo = "0.29.7"
 strum_macros = "0.25.2"
 sha2-const = "0.1.2"
 tar = "0.4"
-flate2 = { version = "1.0.28", default-features = false, features = ["zlib-default"] }
+flate2 = { version = "=1.0.28", default-features = false, features = ["zlib-default"] }
 xz2 = "0.1.7"
 zstd = "0.13.0"
 toml = "0.8.8"
@@ -98,7 +99,6 @@ winreg = "0.51.0"
 windows-service = "0.6.0"
 is_elevated = "0.1.2"
 widestring = "1.0.2"
-dll-syringe = "0.15.2"
 wmi = "0.13.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]

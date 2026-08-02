@@ -10,8 +10,16 @@ use uuid::Uuid;
 
 use crate::{
     core::{
-        auth::storage::TokenError, cloudsync::CloudSyncError, cloudsync::CloudSyncLockMode,
-        library::LibraryError, library::OwnedOffer, service_layer::ServiceLayerError, Maxima,
+        auth::{
+            context::AuthContext,
+            nucleus_auth_exchange,
+            storage::{AuthError, TokenError},
+        },
+        clients::JUNO_PC_CLIENT_ID,
+        cloudsync::{CloudSyncError, CloudSyncLockMode},
+        library::{LibraryError, OwnedOffer},
+        service_layer::ServiceLayerError,
+        Maxima,
     },
     ooa::{needs_license_update, request_and_save_license, LicenseAuth, LicenseError},
     social::client::{SocialRequest, UserPresence, UserPresenceBasic},
@@ -31,9 +39,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Error, Debug)]
 pub enum LaunchError {
     #[error(transparent)]
-    CloudSync(#[from] CloudSyncError),
-    #[error(transparent)]
     Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Auth(#[from] AuthError),
+    #[error(transparent)]
+    CloudSync(#[from] CloudSyncError),
     #[error(transparent)]
     Library(#[from] LibraryError),
     #[error(transparent)]
@@ -73,6 +84,12 @@ pub struct LibraryInjection {
     pub stage: StartupStage,
 }
 
+pub struct LaunchOptions {
+    pub path_override: Option<String>,
+    pub arguments: Vec<String>,
+    pub cloud_saves: bool,
+}
+
 pub enum LaunchMode {
     /// Completely offline, relies on cached license files and user IDs
     Offline(String), // Offer ID
@@ -101,6 +118,7 @@ pub struct ActiveGameContext {
     offer: Option<OwnedOffer>,
     mode: LaunchMode,
     injections: Vec<LibraryInjection>,
+    cloud_saves: bool,
     process: Child,
     started: bool,
 }
@@ -109,6 +127,7 @@ impl ActiveGameContext {
     pub fn new(
         launch_id: &str,
         game_path: &str,
+        cloud_saves: bool,
         content_id: &str,
         offer: Option<OwnedOffer>,
         mode: LaunchMode,
@@ -121,6 +140,7 @@ impl ActiveGameContext {
             offer,
             mode,
             injections: Vec::new(),
+            cloud_saves,
             process,
             started: false,
         }
@@ -154,14 +174,13 @@ impl Display for LaunchMode {
 pub async fn start_game(
     maxima_arc: Arc<Mutex<Maxima>>,
     mode: LaunchMode,
-    game_path_override: Option<String>,
-    mut game_args: Vec<String>,
+    options: LaunchOptions,
 ) -> Result<(), LaunchError> {
     let mut maxima = maxima_arc.lock().await;
     info!("Initiating game launch with {}...", mode);
 
     if let LaunchMode::OnlineOffline(ref content_id, _, _) = mode {
-        if game_path_override.is_none() {
+        if options.path_override.is_none() {
             return Err(LaunchError::GamePathOffline);
         }
 
@@ -197,7 +216,7 @@ pub async fn start_game(
         };
 
     // Need to move this into Maxima and have a "current game" system
-    let path = if let Some(game_path_override) = game_path_override {
+    let path = if let Some(game_path_override) = options.path_override {
         PathBuf::from(&game_path_override)
     } else if !online_offline {
         match offer {
@@ -234,7 +253,7 @@ pub async fn start_game(
                 info!("Existing game license is still valid, not updating");
             }
 
-            if offer.offer().has_cloud_save() {
+            if options.cloud_saves && offer.offer().has_cloud_save() {
                 info!("Syncing with cloud save...");
 
                 let result = maxima
@@ -259,9 +278,16 @@ pub async fn start_game(
         }
         LaunchMode::OnlineOffline(_, ref persona, ref password) => {
             let auth = LicenseAuth::Direct(persona.to_owned(), password.to_owned());
-            request_and_save_license(&auth, &content_id, path.to_owned().into()).await?;
+
+            if needs_license_update(&content_id).await? {
+                request_and_save_license(&auth, &content_id, path.to_owned().into()).await?;
+            } else {
+                info!("Existing game license is still valid, not updating");
+            }
         }
     }
+
+    let mut game_args = options.arguments.clone();
 
     // Append args from env
     if let Ok(args) = env::var("MAXIMA_LAUNCH_ARGS") {
@@ -296,7 +322,8 @@ pub async fn start_game(
         .env("EAFreeTrialGame", "false")
         .env("EAGameLocale", maxima.locale.full_str())
         .env("EAGenericAuthToken", access_token.to_owned())
-        .env("EALaunchCode", "")
+        .env("EALaunchCode", "unavailable")
+        .env("EALaunchOwner", "EA")
         .env(
             "EALaunchEAID",
             user.player()
@@ -313,17 +340,20 @@ pub async fn start_game(
         )
         .env("EASecureLaunchTokenTemp", user.id())
         .env("EASteamProxyIpcPort", "0")
-        .env("OriginSessionKey", launch_id.to_owned())
-        .env("ContentId", content_id.to_owned())
+        .env("OriginSessionKey", launch_id.clone())
+        .env("ContentId", content_id.clone())
         .env("EAOnErrorExitRetCode", "1");
 
     match mode {
         LaunchMode::Offline(_) => todo!(),
         LaunchMode::Online(ref offer_id) => {
+            let short_token = request_opaque_ooa_token(&access_token).await?;
+
             child
-                .env("EAConnectionId", offer_id.to_owned())
-                .env("EALicenseToken", offer_id.to_owned())
-                .env("EALaunchUserAuthToken", access_token);
+                .env("EAConnectionId", offer_id.clone())
+                .env("EALicenseToken", offer_id.clone())
+                .env("EALaunchUserAuthToken", short_token)
+                .env("EAAccessTokenJWS", access_token);
         }
         LaunchMode::OnlineOffline(_, ref persona, ref password) => {
             child
@@ -350,6 +380,7 @@ pub async fn start_game(
     maxima.playing = Some(ActiveGameContext::new(
         &launch_id,
         dir,
+        options.cloud_saves,
         &content_id,
         offer,
         mode,
@@ -357,6 +388,26 @@ pub async fn start_game(
     ));
 
     Ok(())
+}
+
+async fn request_opaque_ooa_token(access_token: &str) -> Result<String, AuthError> {
+    let mut context = AuthContext::new()?;
+    context.set_access_token(&access_token);
+    context.set_token_format("OPAQUE");
+    context.set_expires_in(550);
+
+    // These scopes match the token EA Desktop requests for this
+    context.add_scope("basic.commerce.cartv2");
+    context.add_scope("service.atom");
+    context.add_scope("dp.client.default");
+    context.add_scope("signin");
+    context.add_scope("social_recommendation_user");
+    context.add_scope("basic.optin.write");
+    context.add_scope("basic.commerce.cartv2.write");
+    context.add_scope("basic.billing");
+    context.add_scope("external.social_information_ups_admin");
+
+    nucleus_auth_exchange(&context, JUNO_PC_CLIENT_ID, "token").await
 }
 
 #[cfg(unix)]

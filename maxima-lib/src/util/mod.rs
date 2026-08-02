@@ -7,6 +7,9 @@ pub mod simple_crypto;
 pub mod system_profiler_utils;
 pub mod wmi_utils;
 
+#[cfg(windows)]
+pub mod dll_injector;
+
 #[derive(thiserror::Error, Debug)]
 pub enum BackgroundServiceControlError {
     #[error(transparent)]
@@ -16,6 +19,9 @@ pub enum BackgroundServiceControlError {
     WindowsService(#[from] windows_service::Error),
     #[error(transparent)]
     Nul(#[from] prost::alloc::ffi::NulError),
+    #[cfg(windows)]
+    #[error(transparent)]
+    WidestringContainsNul(#[from] widestring::error::ContainsNul<u16>),
 
     #[error("failed to find service when configuring security")]
     Absent,
