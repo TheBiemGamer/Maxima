@@ -1,38 +1,29 @@
 use super::eadp::{
     common::v1::{DevicePlatformId, PlayerNetworkId, ProductId},
     social::presence::v1::{
-        presence_service_client::PresenceServiceClient,
-        value, ClientInfo,
-        presence_update::PropertiesEnt,
-        ConnectToPresenceSessionRequest, ConnectToPresenceSessionResponse,
-        CreatePresenceSessionRequest, CreatePresenceSessionResponse, PresenceSessionToken,
+        presence_service_client::PresenceServiceClient, presence_update::PropertiesEnt,
+        ClientInfo, ConnectToPresenceSessionRequest, ConnectToPresenceSessionResponse,
+        CreatePresenceSessionRequest, PresenceSessionToken,
         PresenceUpdate, SubscribeToFriendsPresenceRequest,
     },
 };
 use super::SocialError;
 use crate::core::auth::storage::LockedAuthStorage;
-use derive_builder::Builder;
 use derive_getters::Getters;
-use futures::stream::Next;
-use futures::task::noop_waker_ref;
-use futures::{FutureExt, StreamExt, TryFuture};
+use futures::StreamExt;
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use crate::lsx::types::LSXPresence;
 use crate::social::eadp::social::presence::v1::{
     value::Value::{IntegerValue, StringValue},
     PartialUpdatePresenceSessionRequest, PartialUpdatePresenceSessionResponse,
 };
-use log::{debug, error, info};
-use rustls::ClientConfig;
+use log::{error, info};
 use tokio::sync::Mutex;
-use tokio_rustls::TlsConnector;
 use tonic::transport::{Channel, ClientTlsConfig};
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Status};
 use webpki_roots::TLS_SERVER_ROOTS;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -59,6 +50,7 @@ pub struct UserPresence {
     pub offer_id: Option<String>,
     pub multiplayer_id: Option<String>,
     pub rich_presence: Option<String>,
+    pub game_title: Option<String>,
     pub game_presence: Option<String>,
     pub basic: UserPresenceBasic,
 
@@ -75,6 +67,7 @@ impl Default for UserPresence {
             offer_id: None,
             multiplayer_id: None,
             rich_presence: None,
+            game_title: None,
             game_presence: None,
             basic: UserPresenceBasic::Unknown,
 
@@ -83,6 +76,15 @@ impl Default for UserPresence {
             group_public: None,
             joinable: None,
             joinable_invite_only: None,
+        }
+    }
+}
+
+impl UserPresence {
+    pub fn online() -> Self {
+        Self {
+            basic: UserPresenceBasic::Online,
+            ..Default::default()
         }
     }
 }
@@ -115,8 +117,8 @@ pub struct SocialClient {
 impl SocialClient {
     pub fn new(auth: LockedAuthStorage) -> Self {
         let auth1 = auth.clone();
-        let (tx, social_rx) = std::sync::mpsc::channel();
-        let (social_tx, rx) = std::sync::mpsc::channel();
+        let (tx, social_rx) = std::sync::mpsc::channel::<SocialRequest>();
+        let (social_tx, rx) = std::sync::mpsc::channel::<SocialEvent>();
         let social_tx1 = social_tx.clone();
         let (listener_tx, sender_rx) = std::sync::mpsc::channel::<ListenerToSender>();
 
@@ -187,7 +189,10 @@ impl SocialClient {
         rx: Receiver<SocialRequest>,
     ) -> Result<(), SocialError> {
         let token = {
-            let auth = auth.lock().await.access_token().await.unwrap().unwrap();
+            let auth = match auth.lock().await.access_token().await.unwrap() {
+                Some(auth) => auth,
+                None => return Err(SocialError::NoAccessToken)
+            };
             format!("Bearer {}", auth)
         };
         let config = ClientTlsConfig::default().trust_anchors(TLS_SERVER_ROOTS.to_owned());
@@ -228,8 +233,62 @@ impl SocialClient {
                     break 'outer Ok(());
                 }
                 Ok(SocialRequest::UpdatePresence(presence)) => {
+                    info!("updating social presence");
                     let mut presence_props: Vec<PropertiesEnt> = Vec::new();
 
+                    if let Some(offer_id) = presence.offer_id {
+                        presence_props.push(PropertiesEnt::string("ea_app.productId", offer_id));
+                    }
+
+                    if let Some(game_title) = &presence.game_title {
+                        presence_props.push(PropertiesEnt::string("ea_app.gameTitle", game_title.clone()));
+                    }
+
+                    if let Some(rich_presence) = presence.rich_presence {
+                        presence_props.push(PropertiesEnt::string("ea_app.richPresence", rich_presence));
+                    }
+
+                    if let Some(game_presence) = presence.game_presence {
+                        presence_props.push(PropertiesEnt::string("ea_app.presenceStatus", game_presence));
+                    } else {
+                        if let Some(game_title) = presence.game_title {
+                            presence_props.push(PropertiesEnt::string("ea_app.presenceStatus", game_title));
+                        }
+                    }
+
+                    if let Some(joinable) = presence.joinable {
+                        presence_props.push(PropertiesEnt::integer("ea_app.isJoinable", joinable.into()));
+                    }
+
+                    if let Some(joinable_invite_only) = presence.joinable_invite_only {
+                        presence_props.push(PropertiesEnt::integer("ea_app.isJoinableInviteOnly", joinable_invite_only.into()));
+                    }
+
+                    if let Some(multiplayer_id) = presence.multiplayer_id {
+                        presence_props.push(PropertiesEnt::string("ea_app.multiplayerId", multiplayer_id));
+                    }
+
+                    if let Some(group_id) = presence.group_id {
+                        presence_props.push(PropertiesEnt::string("ea_app.groupGuid", group_id));
+                    }
+
+                    if let Some(group_name) = presence.group_name {
+                        presence_props.push(PropertiesEnt::string("ea_app.groupName", group_name));
+                    }
+
+                    if let Some(group_public) = presence.group_public {
+                        presence_props.push(PropertiesEnt::integer("ea_app.groupIsPublic", group_public.into()));
+                    }
+
+                    presence_props.push(PropertiesEnt::integer("ea_app.presenceIsInvisible", 0));
+                    presence_props.push(PropertiesEnt::integer(
+                        "ea_app.presenceAvailability",
+                        match presence.basic {
+                            UserPresenceBasic::Online => -1,
+                            UserPresenceBasic::Away => -2,
+                            _ => 0,
+                        },
+                    ));
 
 
                     let upd = PresenceUpdate {
@@ -258,7 +317,10 @@ impl SocialClient {
         rx: Receiver<SocialEvent>, // this function doesn't need this but i'm keeping it here for shutdown reasons
     ) -> Result<(), SocialError> {
         let token = {
-            let auth = auth.lock().await.access_token().await.unwrap().unwrap();
+            let auth = match auth.lock().await.access_token().await.unwrap() {
+                Some(auth) => auth,
+                None => return Err(SocialError::NoAccessToken)
+            };
             format!("Bearer {}", auth)
         };
         let config = ClientTlsConfig::default().trust_anchors(TLS_SERVER_ROOTS.to_owned());
@@ -366,7 +428,7 @@ impl SocialClient {
                         } // Offer ID
                         "ea_app.gameTitle" => {
                             if let StringValue(val) = value {
-                                user_presence.game_presence = Some(val);
+                                user_presence.game_title = Some(val);
                             }
                         } // "Battlefield 4"
                         "ea_app.richPresence" => {

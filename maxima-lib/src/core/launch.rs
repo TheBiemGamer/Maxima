@@ -14,6 +14,7 @@ use crate::{
         library::LibraryError, library::OwnedOffer, service_layer::ServiceLayerError, Maxima,
     },
     ooa::{needs_license_update, request_and_save_license, LicenseAuth, LicenseError},
+    social::client::{SocialRequest, UserPresence, UserPresenceBasic},
     util::{
         native::{NativeError, SafeParent, SafeStr},
         registry::bootstrap_path,
@@ -334,6 +335,17 @@ pub async fn start_game(
     };
 
     let child = child.spawn().expect("Failed to start child");
+
+    if let LaunchMode::Online(offer_id) = &mode {
+        let offer = offer.clone().unwrap();
+        let _ = maxima.social().tx.send(SocialRequest::UpdatePresence(UserPresence {
+            offer_id: Some(offer_id.clone()),
+            game_title: Some(offer.offer().display_name().clone()),
+            rich_presence: Some("Gaming".to_string()),
+            basic: UserPresenceBasic::Away,
+            ..Default::default()
+        }));
+    }
 
     maxima.playing = Some(ActiveGameContext::new(
         &launch_id,

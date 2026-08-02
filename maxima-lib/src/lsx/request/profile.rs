@@ -4,7 +4,7 @@ use crate::core::service_layer::{
     ServiceFriend, ServiceFriends, ServiceGetMyFriendsRequestBuilder, ServiceLayerError,
     SERVICE_REQUEST_GETMYFRIENDS,
 };
-use crate::social::client::{UserPresence, UserPresenceBasic};
+use crate::social::client::{SocialRequest, UserPresence, UserPresenceBasic};
 use crate::{
     lsx::{
         connection::LockedConnectionState,
@@ -95,19 +95,26 @@ pub async fn handle_set_presence_request(
         return make_lsx_handler_response!(Response, ErrorSuccess, { attr_Code: 0, attr_Description: String::new() });
     }
 
-    let offer = playing.offer().as_ref().unwrap().offer();
+    let offer = playing.offer().as_ref().unwrap().offer().clone();
     let offer_id = offer.offer_id().to_owned();
     let name = offer.display_name().to_owned();
 
     if let Some(presence) = request.attr_RichPresence {
-        maxima
-            .rtm()
-            .set_presence(
-                crate::rtm::client::BasicPresence::Online,
-                &format!("{}: {}", name, presence),
-                &offer_id,
-            )
-            .await?;
+        let _ = maxima.social().tx.send(SocialRequest::UpdatePresence(
+            UserPresence {
+                offer_id: Some(offer_id),
+                multiplayer_id: None,
+                rich_presence: Some(presence),
+                game_presence: request.attr_GamePresence,
+                game_title: Some(name),
+                basic: UserPresenceBasic::Online, // TODO(headassbtw): finally implement
+                group_name: None,
+                group_id: request.attr_SessionId,
+                group_public: None,
+                joinable: None,
+                joinable_invite_only: None,
+            }
+        ));
     }
 
     make_lsx_handler_response!(Response, ErrorSuccess, { attr_Code: 0, attr_Description: String::new() })

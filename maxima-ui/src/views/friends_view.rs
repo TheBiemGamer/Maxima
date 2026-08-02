@@ -211,7 +211,7 @@ pub fn friends_view(app: &mut MaximaEguiApp, ui: &mut Ui) {
           let how_buttons = context.animate_bool_with_easing(Id::new("friendlistbuttons_".to_owned()+&friend.id), buttons, ease_out_cubic);
           let (friend_status, friend_color) =
           match friend.online {
-              UserPresenceBasic::Unknown => (&app.locale.localization.friends_view.status.unknown as &String, Color32::DARK_RED),
+              UserPresenceBasic::Unknown => (&app.locale.localization.friends_view.status.unknown, Color32::DARK_RED),
               UserPresenceBasic::Offline => (&app.locale.localization.friends_view.status.offline, Color32::GRAY),
               //UserPresenceBasic::Dnd => (&app.locale.localization.friends_view.status.do_not_disturb, Color32::RED),
               UserPresenceBasic::Away => (&app.locale.localization.friends_view.status.away, Color32::GOLD),

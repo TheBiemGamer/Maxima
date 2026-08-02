@@ -33,8 +33,29 @@ pub mod eadp {
     pub mod social {
         pub mod presence {
             pub mod v1 {
+                use crate::social::eadp::social::presence::v1::value::Value::{IntegerValue, StringValue, };
+
                 tonic::include_proto!("eadp.social.presence.v1");
 
+                impl presence_update::PropertiesEnt {
+                    pub fn integer(key: &str, val: i64) -> Self {
+                        Self {
+                            key: key.to_string(),
+                            value: Some(Value {
+                                value: Some(IntegerValue(val))
+                            }),
+                        }
+                    }
+
+                    pub fn string(key: &str, val: String) -> Self {
+                        Self {
+                            key: key.to_string(),
+                            value: Some(Value {
+                                value: Some(StringValue(val))
+                            }),
+                        }
+                    }
+                }
             }
         }
     }
@@ -48,4 +69,6 @@ pub enum SocialError {
     Recv(#[from] std::sync::mpsc::RecvError),
     #[error(transparent)]
     TonicStatus(#[from] tonic::Status),
+    #[error("No access token")]
+    NoAccessToken,
 }

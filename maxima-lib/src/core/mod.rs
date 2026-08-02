@@ -65,8 +65,8 @@ use self::{
 use crate::{
     content::manager::{ContentManager, ContentManagerError},
     lsx::{self, service::LSXServerError, types::LSXRequestType},
-    rtm::client::{BasicPresence, RtmClient},
-    social::client::SocialClient,
+    rtm::client::RtmClient,
+    social::client::{SocialClient, SocialRequest, UserPresence, UserPresenceBasic},
     util::native::{maxima_dir, NativeError},
 };
 
@@ -219,6 +219,7 @@ impl Maxima {
             lsx_connections: 0,
             cloud_sync: CloudSyncClient::new(auth_storage.clone()),
             content_manager: ContentManager::new(auth_storage.clone(), false).await?,
+            // TODO(headassbtw): delay these so they don't choke without initial login
             rtm: RtmClient::new(auth_storage.clone()),
             social: SocialClient::new(auth_storage),
             request_cache,
@@ -498,11 +499,8 @@ impl Maxima {
             }
         }
 
-        // We need to store your BasicPresence somewhere
-        self.rtm
-            .set_presence(BasicPresence::Online, "", "")
-            .await
-            .ok();
+        let _ = self.social.tx.send(SocialRequest::UpdatePresence(UserPresence::online()));
+
         self.playing = None;
     }
 
