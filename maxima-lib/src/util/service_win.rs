@@ -160,8 +160,7 @@ pub unsafe fn init_service_security() -> Result<(), BackgroundServiceControlErro
     let mut amended_security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let mut amended_security_descriptor_len: u32 = 0;
     let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        U16CString::from_str(amended_sddl.as_str()).unwrap_or(Err(NativeError::Stringify)?)
-            .as_ptr(),
+        U16CString::from_str(amended_sddl.as_str())?.as_ptr(),
         SDDL_REVISION_1.into(),
         &mut amended_security_descriptor,
         &mut amended_security_descriptor_len,

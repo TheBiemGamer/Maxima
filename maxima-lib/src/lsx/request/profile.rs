@@ -34,7 +34,7 @@ pub async fn handle_profile_request(
     let player = user
         .player()
         .as_ref()
-        .unwrap_or(Err(ServiceLayerError::MissingField)?);
+        .ok_or(ServiceLayerError::MissingField)?;
     let name = player.unique_name();
     debug!("Got profile for {} {:?}", &name, path);
 
@@ -254,7 +254,11 @@ pub async fn handle_get_block_list_request(
         list.push(LSXBlockedUser {
             attr_UserId: blocked.pd().to_string(),
             attr_EAID: "".to_string(),
-            attr_PersonaId: blocked.player_v2().psd().to_string(),
+            attr_PersonaId: if let Some(player) = blocked.player_v2() {
+                player.psd().to_string()
+            } else {
+                String::new()
+            },
         });
     }
 
