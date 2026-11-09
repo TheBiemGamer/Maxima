@@ -2,6 +2,7 @@
 //! logs on stderr, exit code 0 only on success, and no native setup (no service,
 //! no registry keys, no protocol handler, no browser).
 
+mod launch;
 mod login;
 pub mod out;
 pub mod uninstall;
@@ -50,12 +51,12 @@ pub async fn run(cmd: GuildCommand) -> i32 {
         GuildCommand::Library
         | GuildCommand::Info { .. }
         | GuildCommand::Install { .. }
-        | GuildCommand::Import { .. }
-        | GuildCommand::Launch { .. } => match logged_in_maxima().await {
+        | GuildCommand::Import { .. } => match logged_in_maxima().await {
             Ok(_) => fail(ErrorCode::Internal),
             Err(code) => code,
         },
         GuildCommand::Uninstall { offer } => uninstall::run(&offer).await,
+        GuildCommand::Launch { offer, args } => launch::run(&offer, args).await,
     }
 }
 

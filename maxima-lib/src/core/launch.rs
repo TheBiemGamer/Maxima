@@ -67,6 +67,8 @@ pub enum LaunchError {
     NotInstalled(String),
     #[error("bootstrap was not found! Please re-install maxima")]
     BootstrapMissing,
+    #[error("failed to start the game: {0}")]
+    Spawn(std::io::Error),
     #[error(
         "content ID (`{0}`) was specified as an offer ID when launching in OnlineOffline mode"
     )]
@@ -363,7 +365,7 @@ pub async fn start_game(
         }
     };
 
-    let child = child.spawn().expect("Failed to start child");
+    let child = child.spawn().map_err(LaunchError::Spawn)?;
 
     maxima.playing = Some(ActiveGameContext::new(
         &launch_id,
