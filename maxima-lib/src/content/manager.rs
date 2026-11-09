@@ -2,7 +2,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -133,6 +133,21 @@ pub struct GameDownloader {
     total_count: usize,
     total_bytes: usize,
     notify: Arc<Notify>,
+    error: Arc<Mutex<Option<String>>>,
+}
+
+/// Progress for display: retries or rounding can never show more than the total.
+pub(crate) fn capped(completed: usize, total: usize) -> usize {
+    completed.min(total)
+}
+
+/// Error kind stored for a failed touchup. Kinds are short codes, never messages,
+/// so nothing stored can hold a signed URL.
+fn touchup_error_kind(err: &ManifestError) -> &'static str {
+    match err {
+        ManifestError::Native(NativeError::Elevation(_)) => "elevation_declined",
+        _ => "touchup",
+    }
 }
 
 impl GameDownloader {
@@ -171,6 +186,7 @@ impl GameDownloader {
             total_count,
             total_bytes,
             notify: Arc::new(Notify::new()),
+            error: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -178,6 +194,7 @@ impl GameDownloader {
         let (downloader_arc, entries, cancel_token, completed_bytes, notify) =
             self.prepare_download_vars();
         let total_count = self.total_count;
+        let error = self.error.clone();
         tokio::spawn(async move {
             let dl = GameDownloader::start_downloads(
                 total_count,
@@ -185,11 +202,17 @@ impl GameDownloader {
                 entries,
                 cancel_token,
                 completed_bytes,
-                notify,
+                notify.clone(),
             )
             .await;
-            if let Err(err) = dl {
-                error!("Error when downloading!: `{:?}", err)
+            if let Err(kind) = dl {
+                let mut error = error.lock().unwrap();
+                if error.is_none() {
+                    *error = Some(kind.to_owned());
+                }
+                drop(error);
+                // Wake waiters on failure too, or `wait()` would hang forever.
+                notify.notify_one();
             }
         });
     }
@@ -219,7 +242,7 @@ impl GameDownloader {
         cancel_token: CancellationToken,
         completed_bytes: Arc<AtomicUsize>,
         notify: Arc<Notify>,
-    ) -> Result<(), DownloaderError> {
+    ) -> Result<(), &'static str> {
         let mut handles = Vec::with_capacity(total_count);
 
         for i in 0..total_count {
@@ -238,28 +261,56 @@ impl GameDownloader {
                     result = downloader.download_single_file(&ele, Some(Box::new(move |bytes| {
                         completed_bytes.fetch_add(bytes, Ordering::SeqCst);
                     }))) => {
-                        if let Err(err) = result {
-                            error!("File download failed: {}", err);
+                        match result {
+                            Ok(_) => true,
+                            Err(err) => {
+                                error!("File download failed: {}", err);
+                                false
+                            }
                         }
                     },
                     _ = cancel_token.cancelled() => {
                         info!("Download of {} cancelled", ele.name());
+                        false
                     },
                 }
             });
         }
 
-        let _results = futures::stream::iter(handles)
+        let results = futures::stream::iter(handles)
             .buffer_unordered(16)
-            .collect::<Vec<_>>()
+            .collect::<Vec<bool>>()
             .await;
+
+        // Touchup on a partial install would register a broken game, so stop here.
+        if cancel_token.is_cancelled() {
+            info!("Installation cancelled, skipping touchup");
+            return Err("cancelled");
+        }
+        let failed = results.iter().filter(|ok| !**ok).count();
+        if failed > 0 {
+            error!(
+                "{} of {} files failed to download, skipping touchup",
+                failed, total_count
+            );
+            return Err("file");
+        }
 
         let path = downloader_arc.path();
 
         info!("Files downloaded, running touchup...");
-        let manifest = manifest::read(path.join(MANIFEST_RELATIVE_PATH)).await?;
+        let manifest = match manifest::read(path.join(MANIFEST_RELATIVE_PATH)).await {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                error!("Failed to read install manifest: {}", err);
+                return Err("manifest");
+            }
+        };
 
-        manifest.run_touchup(path).await?;
+        if let Err(err) = manifest.run_touchup(path).await {
+            error!("Touchup failed: {}", err);
+            return Err(touchup_error_kind(&err));
+        }
         info!("Installation finished!");
 
         completed_bytes.fetch_add(1, Ordering::SeqCst);
@@ -278,16 +329,24 @@ impl GameDownloader {
     }
 
     pub fn is_done(&self) -> bool {
-        self.completed_bytes.load(Ordering::SeqCst) == self.total_bytes
+        self.error().is_none() && self.completed_bytes.load(Ordering::SeqCst) >= self.total_bytes
+    }
+
+    /// Why the install failed, once it has: `"file"`, `"manifest"`, `"touchup"`,
+    /// `"elevation_declined"` or `"cancelled"`. `None` while running or after success.
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().unwrap().clone()
     }
 
     pub fn percentage_done(&self) -> f64 {
-        let completed = self.completed_bytes.load(Ordering::SeqCst);
-        (completed as f64 / self.total_bytes as f64) * 100.0
+        (self.bytes_downloaded() as f64 / self.total_bytes as f64) * 100.0
     }
 
     pub fn bytes_downloaded(&self) -> usize {
-        self.completed_bytes.load(Ordering::SeqCst)
+        capped(
+            self.completed_bytes.load(Ordering::SeqCst),
+            self.total_bytes,
+        )
     }
 
     pub fn bytes_total(&self) -> usize {
@@ -304,6 +363,10 @@ pub struct ContentManager {
     queue: DownloadQueue,
     service: ContentService,
     current: Option<GameDownloader>,
+    /// Error kind of the last install that failed (see `GameDownloader::error`).
+    /// `update()` drops the downloader when it emits `InstallFailed`, so the kind is kept here.
+    /// Cleared when the next install starts.
+    last_error: Option<String>,
 }
 
 impl ContentManager {
@@ -312,6 +375,7 @@ impl ContentManager {
             queue: DownloadQueue::load().await?,
             service: ContentService::new(auth),
             current: None,
+            last_error: None,
         })
     }
 
@@ -350,6 +414,7 @@ impl ContentManager {
             return Err(ContentManagerError::DownloadInProgress);
         }
 
+        self.last_error = None;
         self.queue.current = Some(game.clone());
         self.queue.save().await?;
 
@@ -363,7 +428,15 @@ impl ContentManager {
         let mut event = None;
 
         if let Some(current) = &self.current {
-            if current.is_done() {
+            if let Some(kind) = current.error() {
+                // Don't start the next queued game: whatever broke this one
+                // (network, disk, a declined prompt) would most likely break that too.
+                event = Some(MaximaEvent::InstallFailed(current.offer_id.to_owned()));
+                self.last_error = Some(kind);
+                self.current = None;
+                self.queue.current = None;
+                self.queue.save().await?;
+            } else if current.is_done() {
                 event = Some(MaximaEvent::InstallFinished(current.offer_id.to_owned()));
                 self.current = None;
                 self.queue.current = None;
@@ -377,5 +450,24 @@ impl ContentManager {
         }
 
         Ok(event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_never_exceeds_total() {
+        assert_eq!(capped(120, 100), 100);
+        assert_eq!(capped(50, 100), 50);
+    }
+
+    #[test]
+    fn declined_elevation_has_its_own_kind() {
+        let declined = ManifestError::Native(NativeError::Elevation("touchup.exe".to_owned()));
+        assert_eq!(touchup_error_kind(&declined), "elevation_declined");
+        let failed = ManifestError::Native(NativeError::Command(1));
+        assert_eq!(touchup_error_kind(&failed), "touchup");
     }
 }

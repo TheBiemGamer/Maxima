@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     prelude,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     task,
 };
 
@@ -261,13 +264,27 @@ struct DownloadContext {
 
 type BytesDownloadedCallback = Box<dyn Fn(usize) + Send + Sync>;
 
+const DOWNLOAD_TRIES: usize = 5;
+
+fn decoder_for(file: File, compression: &CompressionType) -> Box<dyn DownloadDecoder> {
+    let writer = BufWriter::new(file);
+    match compression {
+        CompressionType::None => Box::new(NoopDecoder::new(writer)),
+        CompressionType::Deflate => Box::new(ZLibDeflateDecoder::new(writer)),
+    }
+}
+
 struct EntryDownloadRequest<'a> {
     context: &'a DownloadContext,
     url: &'a str,
     entry: &'a ZipFileEntry,
+    file_path: &'a Path,
     client: Client,
     decoder: Box<dyn DownloadDecoder>,
     callback: Option<BytesDownloadedCallback>,
+    /// Bytes of this entry already passed to `callback`, across all attempts.
+    /// Every attempt starts at byte 0, so a retry only reports bytes past this mark.
+    reported: AtomicUsize,
 }
 
 impl<'a> EntryDownloadRequest<'a> {
@@ -275,6 +292,7 @@ impl<'a> EntryDownloadRequest<'a> {
         context: &'a DownloadContext,
         url: &'a str,
         entry: &'a ZipFileEntry,
+        file_path: &'a Path,
         client: Client,
         decoder: Box<dyn DownloadDecoder>,
         callback: Option<BytesDownloadedCallback>,
@@ -283,9 +301,11 @@ impl<'a> EntryDownloadRequest<'a> {
             context,
             url,
             entry,
+            file_path,
             client,
             decoder,
             callback,
+            reported: AtomicUsize::new(0),
         }
     }
 
@@ -332,8 +352,21 @@ impl<'a> EntryDownloadRequest<'a> {
     }
 
     async fn download(&mut self) -> Result<(), DownloadError> {
-        let mut tries = 0;
-        while tries < 5 {
+        for attempt in 0..DOWNLOAD_TRIES {
+            if attempt > 0 {
+                // Each attempt restarts at byte 0, so it needs a decoder and file
+                // position that are fresh too, not the half-fed ones of the failed try.
+                match OpenOptions::new().write(true).open(self.file_path).await {
+                    Ok(file) => {
+                        self.decoder = decoder_for(file, self.entry.compression_type());
+                    }
+                    Err(err) => {
+                        error!("Failed to reopen {} for retry: {}", self.entry.name(), err);
+                        break;
+                    }
+                }
+            }
+
             // State serialization is disabled for now.
             //let start = self.decoder.write_in_pos() as i64;
 
@@ -348,15 +381,21 @@ impl<'a> EntryDownloadRequest<'a> {
             );
             let end = *self.entry.compressed_size();
 
-            let result = self.download_range(start, end).await;
-            if result.is_ok() {
-                break;
+            match self.download_range(start, end).await {
+                Ok(()) => return Ok(()),
+                Err(err) => warn!(
+                    "Download of {} failed (attempt {}/{}): {}",
+                    self.entry.name(),
+                    attempt + 1,
+                    DOWNLOAD_TRIES,
+                    err
+                ),
             }
-
-            tries += 1;
         }
 
-        Ok(())
+        Err(DownloadError::DownloadFailed(
+            self.reported.load(Ordering::SeqCst),
+        ))
     }
 
     /// End is not inclusive
@@ -364,15 +403,18 @@ impl<'a> EntryDownloadRequest<'a> {
         let offset = self.entry.data_offset();
         let range = format!("bytes={}-{}", offset + start as i64, offset + end - 1);
 
+        // The URL is signed, so errors drop it before they are logged or returned.
         let data = match self
             .client
             .get(self.url)
             .header("range", range)
             .send()
             .await
+            .and_then(|res| res.error_for_status())
         {
             Ok(res) => res,
             Err(err) => {
+                let err = err.without_url();
                 error!("Failed to download ({}): {}", self.entry.name(), err);
                 return Err(DownloaderError::Download(DownloadError::ChunkDownload {
                     entry: self.entry.name().clone(),
@@ -382,7 +424,8 @@ impl<'a> EntryDownloadRequest<'a> {
         };
 
         let stream = data.bytes_stream();
-        let counting_stream = ByteCountingStream::new(stream, self.callback.as_ref());
+        let counting_stream =
+            ByteCountingStream::new(stream, self.callback.as_ref(), &self.reported);
         let stream = counting_stream.into_async_read();
         let mut stream_reader = BufReader::new(stream.compat());
 
@@ -551,12 +594,7 @@ impl ZipDownloader {
             file.set_len(*entry.uncompressed_size() as u64).await?;
         }
 
-        let writer = tokio::io::BufWriter::new(file);
-
-        let mut decoder: Box<dyn DownloadDecoder> = match entry.compression_type() {
-            CompressionType::None => Box::new(NoopDecoder::new(writer)),
-            CompressionType::Deflate => Box::new(ZLibDeflateDecoder::new(writer)),
-        };
+        let mut decoder = decoder_for(file, entry.compression_type());
 
         if state == EntryDownloadState::Resumable {
             let state_file = zstate_path(&self.id, &entry.name())?;
@@ -572,6 +610,7 @@ impl ZipDownloader {
             &context,
             &self.url,
             entry,
+            &file_path,
             self.client.clone(),
             decoder,
             callback,
@@ -584,24 +623,45 @@ impl ZipDownloader {
 
 struct ByteCountingStream<'a, S> {
     inner: S,
+    /// Bytes received in this attempt.
     byte_count: usize,
     callback: Option<&'a BytesDownloadedCallback>,
+    /// Bytes of the entry already reported, shared by all attempts.
+    reported: &'a AtomicUsize,
 }
 
 impl<'a, S> ByteCountingStream<'a, S>
 where
     S: Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
 {
-    fn new(inner: S, callback: Option<&'a BytesDownloadedCallback>) -> Self {
+    fn new(
+        inner: S,
+        callback: Option<&'a BytesDownloadedCallback>,
+        reported: &'a AtomicUsize,
+    ) -> Self {
         ByteCountingStream {
             inner,
             byte_count: 0,
             callback,
+            reported,
         }
     }
 
     fn byte_count(&self) -> usize {
         self.byte_count
+    }
+
+    /// Reports only the bytes past what earlier attempts already reported,
+    /// so a retry never counts the same byte twice.
+    fn report(&mut self, len: usize) {
+        self.byte_count += len;
+        let previous = self.reported.fetch_max(self.byte_count, Ordering::SeqCst);
+        let new_bytes = self.byte_count.saturating_sub(previous);
+        if new_bytes > 0 {
+            if let Some(callback) = &self.callback {
+                callback(new_bytes);
+            }
+        }
     }
 }
 
@@ -617,16 +677,11 @@ where
     ) -> std::task::Poll<Option<Self::Item>> {
         match self.inner.poll_next_unpin(cx) {
             std::task::Poll::Ready(Some(Ok(chunk))) => {
-                self.byte_count += chunk.len();
-
-                if let Some(callback) = &self.callback {
-                    callback(chunk.len());
-                }
-
+                self.report(chunk.len());
                 std::task::Poll::Ready(Some(Ok(chunk)))
             }
             std::task::Poll::Ready(Some(Err(err))) => {
-                error!("Downloader error: {:?}", err);
+                error!("Downloader error: {}", err.without_url());
                 std::task::Poll::Ready(Some(Err(futures::io::Error::other(
                     DownloadError::DownloadFailed(self.byte_count),
                 ))))
@@ -634,5 +689,66 @@ where
             std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retry_failure_is_an_error() {
+        let dir = std::env::temp_dir().join("maxima-retry-failure-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("file.bin");
+        std::fs::write(&file_path, b"").unwrap();
+
+        let context = DownloadContext {
+            id: "test".to_owned(),
+            path: dir.clone(),
+        };
+        let entry = ZipFileEntry::default();
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&file_path)
+            .await
+            .unwrap();
+        let decoder: Box<dyn DownloadDecoder> = Box::new(NoopDecoder::new(BufWriter::new(file)));
+
+        let mut request = EntryDownloadRequest::new(
+            &context,
+            "http://127.0.0.1:9/file.zip",
+            &entry,
+            &file_path,
+            Client::new(),
+            decoder,
+            None,
+        );
+
+        assert!(request.download().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn retry_counts_each_byte_once() {
+        let total = Arc::new(AtomicUsize::new(0));
+        let counter = total.clone();
+        let callback: BytesDownloadedCallback = Box::new(move |bytes| {
+            counter.fetch_add(bytes, Ordering::SeqCst);
+        });
+        let reported = AtomicUsize::new(0);
+
+        // A failed attempt that got 7 bytes in, then a full retry of 10 bytes.
+        for chunks in [vec![4usize, 3], vec![5, 5]] {
+            let stream = futures::stream::iter(
+                chunks
+                    .into_iter()
+                    .map(|len| Ok::<_, reqwest::Error>(Bytes::from(vec![0u8; len]))),
+            );
+            let _ = ByteCountingStream::new(stream, Some(&callback), &reported)
+                .collect::<Vec<_>>()
+                .await;
+        }
+
+        assert_eq!(total.load(Ordering::SeqCst), 10);
     }
 }

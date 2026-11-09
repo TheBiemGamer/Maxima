@@ -406,6 +406,9 @@ impl BridgeThread {
                                 .send(MaximaLibResponse::DownloadFinished(offer_id))?;
                             Self::update_queue(maxima.content_manager(), backend_responder.clone());
                         }
+                        maxima::core::MaximaEvent::InstallFailed(_) => {
+                            Self::update_queue(maxima.content_manager(), backend_responder.clone());
+                        }
                     }
                 }
             }
