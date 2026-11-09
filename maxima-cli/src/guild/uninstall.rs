@@ -45,7 +45,10 @@ pub async fn run(offer_id: &str) -> i32 {
     let dir = match parse_partial_registry_path(&check).await {
         Ok(dir) => dir,
         Err(err) => {
-            log::error!("Failed to resolve the install folder: {}", scrub(&err.to_string()));
+            log::error!(
+                "Failed to resolve the install folder: {}",
+                scrub(&err.to_string())
+            );
             return fail(ErrorCode::Path);
         }
     };
