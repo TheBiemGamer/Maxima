@@ -1,17 +1,24 @@
-//! `guild uninstall <offer>`: deletes the offer's install folder.
+//! `guild uninstall <offer>`: deletes the files of the offer's installed build.
 //!
-//! The registry values the game's touchup wrote stay (they are under HKLM and
-//! need elevation); `is_installed()` reads false once the folder is gone.
+//! Only the files listed in the build's zip central directory are removed,
+//! plus `__Installer` and the folders that end up empty, so anything else the
+//! user keeps in the install folder (which can be a shared library folder)
+//! survives. The registry values the game's touchup wrote stay (they are under
+//! HKLM and need elevation); `is_installed()` reads false once the files are gone.
 
 use std::{
-    env,
+    collections::BTreeSet,
+    env, fs, io,
     path::{Component, Path, PathBuf},
 };
 
-use maxima::util::native::maxima_dir;
+use maxima::{content::zip::ZipFile, core::Maxima, util::native::maxima_dir};
 use serde::Serialize;
 
+use super::library::without_urls;
 use super::out::{emit, fail, scrub, ErrorCode};
+
+const INSTALLER_DIR: &str = "__Installer";
 
 #[derive(Serialize)]
 struct DoneEvent {
@@ -54,14 +61,192 @@ pub async fn run(offer_id: &str) -> i32 {
         return fail(ErrorCode::Path);
     }
 
-    log::info!("Deleting {}", dir.display());
-    if let Err(err) = tokio::fs::remove_dir_all(&dir).await {
-        log::error!("Failed to delete {}: {}", dir.display(), err);
+    let installed_version = offer.installed_version().await.ok();
+    let mut maxima = maxima_arc.lock().await;
+    let entries = build_entries(&mut maxima, offer.offer_id(), installed_version.as_deref()).await;
+    drop(maxima);
+    let Some(entries) = entries else {
+        return fail(ErrorCode::Download);
+    };
+
+    let (files, dirs) = plan_removal(&dir, &entries);
+    log::info!(
+        "Deleting {} files of {} from {}",
+        files.len(),
+        offer.offer_id(),
+        dir.display()
+    );
+    let failed = apply_removal(&dir, &files, &dirs);
+    if failed > 0 {
+        log::error!("{} files in {} could not be deleted", failed, dir.display());
         return fail(ErrorCode::Path);
     }
 
     emit(&DoneEvent { done: true });
     0
+}
+
+/// The entry names of the installed build's zip (the live build when the
+/// installed one isn't listed). Logs why and returns `None` when they can't be
+/// fetched.
+async fn build_entries(
+    maxima: &mut Maxima,
+    offer_id: &str,
+    installed_version: Option<&str>,
+) -> Option<Vec<String>> {
+    let service = maxima.content_manager().service();
+    let builds = match service.available_builds(offer_id).await {
+        Ok(builds) => builds,
+        Err(err) => {
+            log::error!("Failed to list builds: {}", without_urls(&err.to_string()));
+            return None;
+        }
+    };
+    // `build()` matches on the game version, which is what the manifest records.
+    let build = installed_version
+        .and_then(|version| builds.build(version))
+        .or_else(|| builds.live_build());
+    let Some(build) = build else {
+        log::error!("{} has no build to read the file list from", offer_id);
+        return None;
+    };
+    // Never log or print this URL: it is signed.
+    let url = match service.download_url(offer_id, Some(build.build_id())).await {
+        Ok(meta) => meta.url().clone(),
+        Err(err) => {
+            log::error!(
+                "Failed to get the build's download address: {}",
+                without_urls(&err.to_string())
+            );
+            return None;
+        }
+    };
+    match ZipFile::fetch(&url).await {
+        Ok(zip) => Some(zip.entries().iter().map(|e| e.name().clone()).collect()),
+        Err(err) => {
+            log::error!(
+                "Failed to read the build's file list: {}",
+                without_urls(&err.to_string())
+            );
+            None
+        }
+    }
+}
+
+/// The relative path of a zip entry, or `None` for an entry that must not be
+/// touched: absolute, with a drive or other prefix, or containing `..`.
+/// Accepts `/` and `\` as separators and drops empty and `.` segments.
+fn entry_path(name: &str) -> Option<PathBuf> {
+    if name.starts_with(['/', '\\']) || name.contains('\0') {
+        return None;
+    }
+    let mut rel = PathBuf::new();
+    for segment in name.split(['/', '\\']) {
+        match segment {
+            "" | "." => continue,
+            ".." => return None,
+            // A drive (`C:`) or an alternate data stream.
+            s if s.contains(':') => return None,
+            s => rel.push(s),
+        }
+    }
+    // What we built must be plain names only.
+    if rel.as_os_str().is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+        return None;
+    }
+    Some(rel)
+}
+
+/// Which paths deleting a build from `root` touches: the files its zip lists
+/// and the folders those files sit in (deepest first, `root` itself not
+/// included). Directory entries (ending in `/`) are not files, but their
+/// folders count. Unsafe entries are dropped, so every path is below `root`.
+pub fn plan_removal(root: &Path, entries: &[String]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut files = BTreeSet::new();
+    let mut dirs = BTreeSet::new();
+    for name in entries {
+        let Some(rel) = entry_path(name) else {
+            log::warn!("Skipping unsafe entry {:?}", name);
+            continue;
+        };
+        let mut parent = if name.ends_with(['/', '\\']) {
+            Some(rel.as_path())
+        } else {
+            files.insert(rel.clone());
+            rel.parent()
+        };
+        while let Some(dir) = parent.filter(|d| !d.as_os_str().is_empty()) {
+            dirs.insert(dir.to_path_buf());
+            parent = dir.parent();
+        }
+    }
+
+    let files = files.into_iter().map(|f| root.join(f)).collect();
+    let mut dirs: Vec<PathBuf> = dirs.into_iter().collect();
+    // Deepest first; ties in path order so the result is stable.
+    dirs.sort_by(|a, b| {
+        b.components()
+            .count()
+            .cmp(&a.components().count())
+            .then_with(|| a.cmp(b))
+    });
+    let dirs = dirs.into_iter().map(|d| root.join(d)).collect();
+    (files, dirs)
+}
+
+/// Deletes `files`, `root/__Installer`, then each of `dirs` and `root` if
+/// empty. Missing paths are fine; a file reached through a link that leads
+/// out of `root` is skipped. Returns how many files could not be deleted.
+fn apply_removal(root: &Path, files: &[PathBuf], dirs: &[PathBuf]) -> usize {
+    let real_root = match fs::canonicalize(root) {
+        Ok(path) => path,
+        Err(err) => {
+            log::error!("Failed to resolve {}: {}", root.display(), err);
+            return files.len().max(1);
+        }
+    };
+
+    let mut failed = 0;
+    for file in files {
+        // A junction or symlink inside the folder must not lead us out of it.
+        match file.parent().map(fs::canonicalize) {
+            Some(Ok(parent)) if parent.starts_with(&real_root) => {}
+            Some(Ok(_)) => {
+                log::warn!(
+                    "Skipping {}: it is outside the install folder",
+                    file.display()
+                );
+                continue;
+            }
+            // Its folder is already gone, so is the file.
+            _ => continue,
+        }
+        match fs::remove_file(file) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                log::warn!("Failed to delete {}: {}", file.display(), err);
+                failed += 1;
+            }
+        }
+    }
+
+    let installer = root.join(INSTALLER_DIR);
+    match fs::remove_dir_all(&installer) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            log::warn!("Failed to delete {}: {}", installer.display(), err);
+            failed += 1;
+        }
+    }
+
+    // `remove_dir` only removes empty folders: one that still holds something
+    // (in use, or not the game's) stays.
+    for dir in dirs.iter().map(PathBuf::as_path).chain([root]) {
+        let _ = fs::remove_dir(dir);
+    }
+    failed
 }
 
 /// Whether deleting `path` as a game's install folder is safe: it must be
@@ -222,5 +407,149 @@ mod tests {
         };
         assert!(safe_to_remove_with(Path::new(sibling), &protected));
         assert!(safe_to_remove_with(Path::new(child), &protected));
+    }
+
+    fn entries(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn game_root() -> PathBuf {
+        PathBuf::from(if cfg!(windows) {
+            "C:\\Games\\EA"
+        } else {
+            "/games/ea"
+        })
+    }
+
+    #[test]
+    fn plan_drops_unsafe_entries() {
+        let root = game_root();
+        let (files, dirs) = plan_removal(
+            &root,
+            &entries(&[
+                "../evil.txt",
+                "Zau/../../evil.txt",
+                "/etc/passwd",
+                "\\Windows\\evil.dll",
+                "C:/Windows/evil.dll",
+                "C:evil.dll",
+                "Zau/file.txt:stream",
+                "..",
+                "Zau/ok.txt",
+            ]),
+        );
+        assert_eq!(files, vec![root.join("Zau").join("ok.txt")]);
+        assert_eq!(dirs, vec![root.join("Zau")]);
+    }
+
+    #[test]
+    fn plan_lists_parent_dirs_deepest_first() {
+        let root = game_root();
+        let (files, dirs) = plan_removal(&root, &entries(&["Zau/Binaries/Win64/Zau.exe"]));
+        let win64 = root.join("Zau").join("Binaries").join("Win64");
+        assert_eq!(files, vec![win64.join("Zau.exe")]);
+        assert_eq!(
+            dirs,
+            vec![
+                win64.clone(),
+                root.join("Zau").join("Binaries"),
+                root.join("Zau")
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_stays_below_root_and_skips_dir_entries() {
+        let root = game_root();
+        let (files, dirs) = plan_removal(
+            &root,
+            &entries(&[
+                "Zau/",
+                "Zau/Content/",
+                "Zau/Content/a.pak",
+                "Zau\\Content\\b.pak",
+                "./top.txt",
+                "Zau/Logs/",
+            ]),
+        );
+        let content = root.join("Zau").join("Content");
+        assert_eq!(
+            files,
+            vec![
+                content.join("a.pak"),
+                content.join("b.pak"),
+                root.join("top.txt")
+            ]
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                content.clone(),
+                root.join("Zau").join("Logs"),
+                root.join("Zau")
+            ]
+        );
+        for path in files.iter().chain(&dirs) {
+            assert!(
+                path.starts_with(&root) && path != &root,
+                "{}",
+                path.display()
+            );
+            assert!(!path.starts_with(root.join("Other")), "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn removal_keeps_unrelated_files() {
+        let base = env::temp_dir().join(format!("guild-uninstall-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("EA");
+        let names = entries(&[
+            "Zau/Binaries/Win64/Zau.exe",
+            "Zau/Content/Paks/a.pak",
+            "Zau/Content/",
+            "readme.txt",
+        ]);
+        for name in &names {
+            let path = root.join(name);
+            if name.ends_with('/') {
+                fs::create_dir_all(&path).unwrap();
+            } else {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"game").unwrap();
+            }
+        }
+        fs::create_dir_all(root.join(INSTALLER_DIR)).unwrap();
+        fs::write(root.join(INSTALLER_DIR).join("installerdata.xml"), b"x").unwrap();
+        fs::create_dir_all(root.join("Other")).unwrap();
+        fs::write(root.join("Other").join("save.txt"), b"mine").unwrap();
+        // The user's file inside a game folder keeps that folder.
+        fs::write(root.join("Zau").join("Content").join("mod.txt"), b"mine").unwrap();
+
+        // Listed but already missing is fine.
+        let mut listed = names.clone();
+        listed.push("Zau/missing.dll".into());
+        let (files, dirs) = plan_removal(&root, &listed);
+        assert_eq!(apply_removal(&root, &files, &dirs), 0);
+
+        assert!(root.join("Other").join("save.txt").is_file());
+        assert!(root.join("Zau").join("Content").join("mod.txt").is_file());
+        assert!(root.is_dir());
+        for gone in [
+            "Zau/Binaries",
+            "Zau/Content/Paks",
+            "readme.txt",
+            INSTALLER_DIR,
+        ] {
+            assert!(!root.join(gone).exists(), "{gone} should be gone");
+        }
+
+        // With nothing else left, the install folder itself goes too.
+        fs::remove_dir_all(root.join("Other")).unwrap();
+        fs::remove_file(root.join("Zau").join("Content").join("mod.txt")).unwrap();
+        assert_eq!(apply_removal(&root, &files, &dirs), 0);
+        assert!(!root.exists());
+        assert!(base.is_dir());
+        fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -18,7 +18,7 @@ lazy_static! {
 
 /// Error text with every URL removed: the build's download URL is signed, and
 /// reqwest puts it in its errors.
-fn without_urls(text: &str) -> String {
+pub(super) fn without_urls(text: &str) -> String {
     scrub(&URL.replace_all(text, "<url>"))
 }
 
