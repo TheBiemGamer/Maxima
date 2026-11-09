@@ -3,6 +3,7 @@
 //! no registry keys, no protocol handler, no browser).
 
 pub mod out;
+pub mod uninstall;
 
 use clap::Subcommand;
 
@@ -47,8 +48,8 @@ pub async fn run(cmd: GuildCommand) -> i32 {
         | GuildCommand::Info { .. }
         | GuildCommand::Install { .. }
         | GuildCommand::Import { .. }
-        | GuildCommand::Uninstall { .. }
         | GuildCommand::Launch { .. } => fail(ErrorCode::Internal),
+        GuildCommand::Uninstall { offer } => uninstall::run(&offer).await,
     }
 }
 
