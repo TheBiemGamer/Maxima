@@ -8,7 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use maxima::util::{native::maxima_dir, registry::parse_partial_registry_path};
+use maxima::util::native::maxima_dir;
 use serde::Serialize;
 
 use super::out::{emit, fail, scrub, ErrorCode};
@@ -39,18 +39,8 @@ pub async fn run(offer_id: &str) -> i32 {
         return fail(ErrorCode::Path);
     }
 
-    let Some(check) = offer.offer().install_check_override().clone() else {
+    let Some(dir) = super::library::install_dir(&offer).await else {
         return fail(ErrorCode::Path);
-    };
-    let dir = match parse_partial_registry_path(&check).await {
-        Ok(dir) => dir,
-        Err(err) => {
-            log::error!(
-                "Failed to resolve the install folder: {}",
-                scrub(&err.to_string())
-            );
-            return fail(ErrorCode::Path);
-        }
     };
 
     if !safe_to_remove(&dir) {
