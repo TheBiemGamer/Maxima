@@ -216,23 +216,9 @@ impl DiPManifest {
 
     #[cfg(windows)]
     pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<(), ManifestError> {
-        use crate::util::native::NativeError;
-        use tokio::process::Command;
-
         let args = self.collect_touchup_args(install_path)?;
         let path = install_path.join(&self.touchup.path());
-
-        let mut binding = Command::new(path);
-        let child = binding.args(args);
-
-        let status = child.spawn()?.wait().await?;
-        if !status.success() {
-            return Err(ManifestError::Native(NativeError::Command(
-                status.code().unwrap_or(0),
-            )));
-        }
-
-        Ok(())
+        super::run_touchup_elevated(path, args).await
     }
 
     fn collect_touchup_args(&self, install_path: &PathBuf) -> Result<Vec<PathBuf>, ManifestError> {

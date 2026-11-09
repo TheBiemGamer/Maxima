@@ -31,6 +31,39 @@ pub enum ManifestError {
 
 pub const MANIFEST_RELATIVE_PATH: &str = "__Installer/installerdata.xml";
 
+/// Runs a game's touchup installer through one UAC prompt and waits for it.
+/// Touchup writes the game's HKLM keys, so it refuses to start without admin
+/// rights (OS error 740). A declined prompt is `NativeError::Elevation`; a
+/// non-zero exit is `NativeError::Command`.
+#[cfg(windows)]
+pub(crate) async fn run_touchup_elevated(
+    exe: PathBuf,
+    args: Vec<PathBuf>,
+) -> Result<(), ManifestError> {
+    use crate::util::{
+        native::NativeError,
+        registry::{quote_windows_args, run_elevated_and_wait},
+    };
+
+    let args = args
+        .iter()
+        .map(|arg| arg.to_str().map(str::to_owned).ok_or(ManifestError::Decode))
+        .collect::<Result<Vec<_>, _>>()?;
+    let params = quote_windows_args(&args);
+    let cwd = exe
+        .parent()
+        .ok_or_else(|| NativeError::Parent(exe.display().to_string()))?
+        .to_path_buf();
+
+    let code = tokio::task::spawn_blocking(move || run_elevated_and_wait(&exe, &params, &cwd))
+        .await
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))??;
+    if code != 0 {
+        return Err(ManifestError::Native(NativeError::Command(code as i32)));
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 pub trait GameManifest: Send + std::fmt::Debug {
     async fn run_touchup(&self, install_path: &PathBuf) -> Result<(), ManifestError>;
