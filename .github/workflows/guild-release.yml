@@ -67,6 +67,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path target/release/maxima-cli.exe, target/release/maxima-bootstrap.exe -DestinationPath ${{ matrix.archive }}
+          Copy-Item target/release/maxima-cli.exe, target/release/maxima-bootstrap.exe .
           .\target\release\maxima-cli.exe --version
 
       - name: Package (Linux)
@@ -81,7 +82,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}
-          path: ${{ matrix.archive }}
+          path: |
+            ${{ matrix.archive }}
+            *.exe
           if-no-files-found: error
 
   release:
@@ -101,7 +104,7 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: |
-          sha256sum maxima-guild-windows-x86_64.zip maxima-guild-linux-x86_64.tar.gz > SHA256SUMS
+          sha256sum maxima-guild-windows-x86_64.zip maxima-guild-linux-x86_64.tar.gz maxima-cli.exe maxima-bootstrap.exe > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create release
@@ -117,4 +120,6 @@ jobs:
             --notes "maxima-cli and maxima-bootstrap for Guild, built from $GITHUB_SHA with $RUST_TOOLCHAIN." \
             maxima-guild-windows-x86_64.zip \
             maxima-guild-linux-x86_64.tar.gz \
+            maxima-cli.exe \
+            maxima-bootstrap.exe \
             SHA256SUMS
