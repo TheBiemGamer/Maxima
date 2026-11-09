@@ -8,6 +8,10 @@ use regex::Regex;
 
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
+mod guild;
+
+use guild::GuildCommand;
+
 #[cfg(windows)]
 use is_elevated::is_elevated;
 
@@ -110,6 +114,11 @@ enum Mode {
 
         #[arg(long)]
         file: String,
+    },
+    /// Commands for programs: JSON lines on stdout, logs on stderr, no system setup
+    Guild {
+        #[command(subcommand)]
+        command: GuildCommand,
     },
 }
 
@@ -214,6 +223,12 @@ pub async fn login_flow(login_override: Option<String>) -> Result<TokenResponse>
 
 async fn startup() -> Result<()> {
     let args = Args::parse();
+
+    if let Some(Mode::Guild { command }) = &args.mode {
+        // Before upstream's logger, which would write to stdout, and before native_setup.
+        guild::out::init_stderr_logger();
+        std::process::exit(guild::run(command.clone()).await);
+    }
 
     init_logger();
 
@@ -323,6 +338,7 @@ async fn startup() -> Result<()> {
             build_id,
             file,
         } => download_specific_file(maxima_arc.clone(), &offer_id, &build_id, &file).await,
+        Mode::Guild { .. } => unreachable!("guild commands return before native setup"),
     }?;
 
     Ok(())

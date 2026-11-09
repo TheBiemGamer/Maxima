@@ -233,9 +233,25 @@ pub fn module_path() -> Result<PathBuf, NativeError> {
     Ok(env::current_exe()?)
 }
 
+/// `MAXIMA_DATA_DIR`, when set and non-empty, replaces the default data dir on every OS.
+fn data_dir_override() -> Result<Option<PathBuf>, NativeError> {
+    match env::var_os("MAXIMA_DATA_DIR") {
+        Some(dir) if !dir.is_empty() => {
+            let path = PathBuf::from(dir);
+            create_dir_all(&path)?;
+            Ok(Some(path))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[cfg(not(unix))]
 pub fn maxima_dir() -> Result<PathBuf, NativeError> {
     use directories::ProjectDirs;
+
+    if let Some(path) = data_dir_override()? {
+        return Ok(path);
+    }
 
     let dirs = ProjectDirs::from("com", "ArmchairDevelopers", "Maxima");
     let path = dirs.unwrap().data_dir().to_path_buf();
@@ -245,6 +261,10 @@ pub fn maxima_dir() -> Result<PathBuf, NativeError> {
 
 #[cfg(unix)]
 pub fn maxima_dir() -> Result<PathBuf, NativeError> {
+    if let Some(path) = data_dir_override()? {
+        return Ok(path);
+    }
+
     let home = if let Ok(home) = env::var("XDG_DATA_HOME") {
         home
     } else if let Ok(home) = env::var("HOME") {
