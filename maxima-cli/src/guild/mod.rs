@@ -4,6 +4,7 @@
 
 mod login;
 pub mod out;
+pub mod uninstall;
 
 use clap::Subcommand;
 use log::error;
@@ -50,11 +51,11 @@ pub async fn run(cmd: GuildCommand) -> i32 {
         | GuildCommand::Info { .. }
         | GuildCommand::Install { .. }
         | GuildCommand::Import { .. }
-        | GuildCommand::Uninstall { .. }
         | GuildCommand::Launch { .. } => match logged_in_maxima().await {
             Ok(_) => fail(ErrorCode::Internal),
             Err(code) => code,
         },
+        GuildCommand::Uninstall { offer } => uninstall::run(&offer).await,
     }
 }
 
