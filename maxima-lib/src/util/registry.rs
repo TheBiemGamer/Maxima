@@ -1,7 +1,7 @@
 #[cfg(windows)]
 extern crate winapi;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -12,10 +12,20 @@ use widestring::U16CString;
 
 #[cfg(windows)]
 use winapi::{
-    shared::{minwindef::HKEY, winerror::ERROR_CANCELLED},
+    shared::{
+        minwindef::{DWORD, HKEY},
+        winerror::ERROR_CANCELLED,
+    },
     um::{
         errhandlingapi::GetLastError,
-        shellapi::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NO_CONSOLE},
+        handleapi::CloseHandle,
+        processthreadsapi::GetExitCodeProcess,
+        shellapi::{
+            ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NO_CONSOLE, SHELLEXECUTEINFOW,
+        },
+        synchapi::WaitForSingleObject,
+        winbase::{INFINITE, WAIT_OBJECT_0},
+        winnt::HANDLE,
     },
     um::{
         winnt::KEY_QUERY_VALUE,
@@ -254,35 +264,114 @@ pub fn bootstrap_path() -> std::result::Result<PathBuf, NativeError> {
 #[cfg(windows)]
 pub fn launch_bootstrap() -> Result<(), NativeError> {
     let path = bootstrap_path()?;
+    let process = shell_execute_runas(&path, "", None)?;
+    if !process.is_null() {
+        unsafe { CloseHandle(process) };
+    }
+    Ok(())
+}
 
-    let verb = "runas";
-    let file = path.safe_str()?;
-    let file1 = file.to_string();
-    let parameters = "";
+/// Starts `file` through a UAC prompt (`runas`), waits for it to exit and returns
+/// its exit code. `params` is the full command line after the program name; quote
+/// each argument with [`quote_windows_args`]. A declined prompt returns
+/// `NativeError::Elevation`, at once.
+#[cfg(windows)]
+pub fn run_elevated_and_wait(file: &Path, params: &str, cwd: &Path) -> Result<u32, NativeError> {
+    let process = shell_execute_runas(file, params, Some(cwd))?;
+    if process.is_null() {
+        // ShellExecuteExW handed the file to something other than a new process.
+        return Err(NativeError::CantFindProcess);
+    }
 
-    let verb = verb.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let file = file.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let parameters = parameters.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    unsafe {
+        let waited = WaitForSingleObject(process, INFINITE);
+        let mut code: DWORD = 0;
+        let got_code = GetExitCodeProcess(process, &mut code);
+        let err = std::io::Error::last_os_error();
+        CloseHandle(process);
 
-    let mut shell_execute_info = winapi::um::shellapi::SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<winapi::um::shellapi::SHELLEXECUTEINFOW>() as u32,
+        if waited != WAIT_OBJECT_0 || got_code == 0 {
+            return Err(NativeError::Io(err));
+        }
+        Ok(code)
+    }
+}
+
+/// `ShellExecuteExW` with the `runas` verb. Returns the process handle (null when
+/// no process was started); the caller closes it.
+#[cfg(windows)]
+fn shell_execute_runas(
+    file: &Path,
+    params: &str,
+    cwd: Option<&Path>,
+) -> Result<HANDLE, NativeError> {
+    let file_str = file.safe_str()?.to_owned();
+
+    let verb = U16CString::from_str("runas").map_err(|_| NativeError::Stringify)?;
+    let file_w = U16CString::from_str(&file_str).map_err(|_| NativeError::Stringify)?;
+    let params_w = U16CString::from_str(params).map_err(|_| NativeError::Stringify)?;
+    let cwd_w = match cwd {
+        Some(cwd) => {
+            Some(U16CString::from_str(cwd.safe_str()?).map_err(|_| NativeError::Stringify)?)
+        }
+        None => None,
+    };
+
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         lpVerb: verb.as_ptr(),
-        lpFile: file.as_ptr(),
-        lpParameters: parameters.as_ptr(),
+        lpFile: file_w.as_ptr(),
+        lpParameters: params_w.as_ptr(),
+        lpDirectory: cwd_w.as_ref().map_or(ptr::null(), |cwd| cwd.as_ptr()),
         fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE,
         ..Default::default()
     };
 
     unsafe {
-        ShellExecuteExW(&mut shell_execute_info);
-
-        let err = GetLastError();
-        if err == ERROR_CANCELLED {
-            return Err(NativeError::Elevation(file1));
+        if ShellExecuteExW(&mut info) == 0 {
+            if GetLastError() == ERROR_CANCELLED {
+                return Err(NativeError::Elevation(file_str));
+            }
+            return Err(NativeError::Io(std::io::Error::last_os_error()));
         }
     }
 
-    Ok(())
+    Ok(info.hProcess)
+}
+
+/// Joins arguments into one Windows command line, quoting each so that
+/// `CommandLineToArgvW` and the MSVC runtime split it back into the same arguments.
+pub fn quote_windows_args<S: AsRef<str>>(args: &[S]) -> String {
+    args.iter()
+        .map(|arg| quote_windows_arg(arg.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_windows_arg(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                // Backslashes before a quote are escapes, so double them, then escape the quote.
+                out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat('\\').take(backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    // Trailing backslashes would escape the closing quote.
+    out.extend(std::iter::repeat('\\').take(backslashes * 2));
+    out.push('"');
+    out
 }
 
 #[cfg(windows)]
@@ -496,4 +585,24 @@ pub fn bootstrap_path() -> Result<PathBuf, NativeError> {
 #[cfg(unix)]
 pub fn launch_bootstrap() -> Result<(), RegistryError> {
     todo!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quote_windows_args;
+
+    #[test]
+    fn quotes_each_argument() {
+        assert_eq!(
+            quote_windows_args(&["-locale", "en_US", r"C:\Games\EA\Tales of Kenzera"]),
+            r#""-locale" "en_US" "C:\Games\EA\Tales of Kenzera""#
+        );
+    }
+
+    #[test]
+    fn escapes_quotes_and_trailing_backslashes() {
+        assert_eq!(quote_windows_args(&[r"C:\Games\"]), r#""C:\Games\\""#);
+        assert_eq!(quote_windows_args(&[r#"a\"b"#]), r#""a\\\"b""#);
+        assert_eq!(quote_windows_args(&[""]), r#""""#);
+    }
 }
