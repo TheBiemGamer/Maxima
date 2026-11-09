@@ -1,0 +1,120 @@
+name: Guild Release
+
+on:
+  push:
+    tags:
+      - "guild-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: nightly-2026-11-08
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            archive: maxima-guild-windows-x86_64.zip
+          - os: ubuntu-latest
+            archive: maxima-guild-linux-x86_64.tar.gz
+
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-11-08
+          targets: ${{ runner.os == 'Linux' && 'x86_64-unknown-linux-musl' || '' }}
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os }}-guild-release
+          cache-on-failure: true
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release -p maxima-cli -p maxima-bootstrap
+
+      - name: Build (Linux, musl static)
+        if: runner.os == 'Linux'
+        run: cargo build --release --target x86_64-unknown-linux-musl -p maxima-cli -p maxima-bootstrap
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/maxima-cli.exe, target/release/maxima-bootstrap.exe -DestinationPath ${{ matrix.archive }}
+          .\target\release\maxima-cli.exe --version
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd target/x86_64-unknown-linux-musl/release
+          chmod +x maxima-cli maxima-bootstrap
+          file maxima-cli maxima-bootstrap
+          ./maxima-cli --version
+          tar -czf "$GITHUB_WORKSPACE/${{ matrix.archive }}" maxima-cli maxima-bootstrap
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/guild-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum maxima-guild-windows-x86_64.zip maxima-guild-linux-x86_64.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes "maxima-cli and maxima-bootstrap for Guild, built from $GITHUB_SHA with $RUST_TOOLCHAIN." \
+            maxima-guild-windows-x86_64.zip \
+            maxima-guild-linux-x86_64.tar.gz \
+            SHA256SUMS
