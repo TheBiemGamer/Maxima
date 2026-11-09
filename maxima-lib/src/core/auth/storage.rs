@@ -308,6 +308,20 @@ impl AuthStorage {
         Ok(())
     }
 
+    /// Remove the currently selected account and save. Returns whether an account was removed.
+    pub fn remove_selected(&mut self) -> Result<bool, TokenError> {
+        let removed = match self.selected.take() {
+            Some(selected) => self.accounts.remove(&selected).is_some(),
+            None => false,
+        };
+
+        if self.can_save {
+            self.save()?;
+        }
+
+        Ok(removed)
+    }
+
     fn save_if_dirty(&self) -> Result<(), TokenError> {
         if !self.can_save {
             return Ok(());
