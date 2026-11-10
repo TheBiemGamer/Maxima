@@ -29,7 +29,9 @@ use crate::util::{
 };
 
 lazy_static! {
-    static ref PROTON_PATTERN: Regex = Regex::new(r"GE-Proton\d+-\d+\.tar\.gz").unwrap();
+    // Since GE-Proton 11 the x86_64 build is `GE-Proton11-12-x86_64.tar.gz`, next to an aarch64 one.
+    static ref PROTON_PATTERN: Regex =
+        Regex::new(r"^GE-Proton\d+-\d+(-x86_64)?\.tar\.gz$").unwrap();
 }
 
 // A Proton verb to use

@@ -78,6 +78,7 @@ jobs:
           file maxima-cli maxima-bootstrap
           ./maxima-cli --version
           tar -czf "$GITHUB_WORKSPACE/${{ matrix.archive }}" maxima-cli maxima-bootstrap
+          cp maxima-cli maxima-bootstrap "$GITHUB_WORKSPACE/"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -85,6 +86,8 @@ jobs:
           path: |
             ${{ matrix.archive }}
             *.exe
+            maxima-cli
+            maxima-bootstrap
           if-no-files-found: error
 
   release:
@@ -104,7 +107,7 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: |
-          sha256sum maxima-guild-windows-x86_64.zip maxima-guild-linux-x86_64.tar.gz maxima-cli.exe maxima-bootstrap.exe > SHA256SUMS
+          sha256sum maxima-guild-windows-x86_64.zip maxima-guild-linux-x86_64.tar.gz maxima-cli.exe maxima-bootstrap.exe maxima-cli maxima-bootstrap > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create release
@@ -122,4 +125,6 @@ jobs:
             maxima-guild-linux-x86_64.tar.gz \
             maxima-cli.exe \
             maxima-bootstrap.exe \
+            maxima-cli \
+            maxima-bootstrap \
             SHA256SUMS
