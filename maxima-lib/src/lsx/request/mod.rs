@@ -1,4 +1,5 @@
 pub mod account;
+pub mod achievements;
 pub mod auth;
 pub mod challenge;
 pub mod config;

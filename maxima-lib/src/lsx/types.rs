@@ -111,6 +111,7 @@ pub enum LSXRequestType {
     QueryFriends(LSXQueryFriends),
     QueryEntitlements(LSXQueryEntitlements),
     QueryImage(LSXQueryImage),
+    QueryAchievements(LSXQueryAchievements),
     GetVoipStatus(LSXGetVoipStatus),
     ShowIGOWindow(LSXShowIGOWindow),
     SetDownloaderUtilization(LSXSetDownloaderUtilization),
@@ -137,6 +138,7 @@ pub enum LSXResponseType {
     QueryFriendsResponse(LSXQueryFriendsResponse),
     QueryEntitlementsResponse(LSXQueryEntitlementsResponse),
     QueryImageResponse(LSXQueryImageResponse),
+    AchievementSets(LSXAchievementSets),
     GetVoipStatusResponse(LSXGetVoipStatusResponse),
 }
 
@@ -753,4 +755,37 @@ lsx_message! {
         Active: bool,
     },
     data {}
+}
+
+// Every attribute is optional so the request parses whatever subset a game sends.
+lsx_message! {
+    QueryAchievements;
+    attr {
+        PersonaId: Option<String>,
+        GameId: Option<String>,
+        All: Option<String>,
+        Mode: Option<String>,
+    },
+    data {}
+}
+
+lsx_message! {
+    AchievementSet;
+    attr {
+        Name: String,
+    },
+    data {}
+}
+
+lsx_message! {
+    AchievementSets;
+    attr {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        PersonaId: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        GameId: Option<String>,
+    },
+    data {
+        achievement_set: Vec<LSXAchievementSet>,
+    }
 }

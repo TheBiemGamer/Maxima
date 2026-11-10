@@ -236,6 +236,20 @@ fn get_wine_release() -> Result<GithubRelease, WineError> {
     release.ok_or(WineError::Fetch)
 }
 
+/// umu-protonfixes keys its game-specific fixes off `GAMEID`. Guild passes the
+/// game's umu id (e.g. `umu-2316580`) in `MAXIMA_UMU_GAMEID`; without it we fall
+/// back to the generic `umu-0`.
+fn umu_game_id() -> String {
+    umu_game_id_from(env::var("MAXIMA_UMU_GAMEID").ok())
+}
+
+fn umu_game_id_from(value: Option<String>) -> String {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "umu-0".to_string())
+}
+
 pub async fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
     arg: T,
     args: Option<I>,
@@ -255,7 +269,7 @@ pub async fn run_wine_command<I: IntoIterator<Item = T>, T: AsRef<OsStr>>(
     let mut binding = Command::new(wine_path.clone());
     let mut child = binding
         .env("WINEPREFIX", proton_prefix_path)
-        .env("GAMEID", "umu-0")
+        .env("GAMEID", umu_game_id())
         .env("PROTON_VERB", &command_type.to_string())
         .env("PROTONPATH", proton_path)
         .env("STORE", "ea")
@@ -514,4 +528,21 @@ pub async fn get_mx_wine_registry_value(query_key: &str) -> Result<Option<String
     };
 
     Ok(value.map(|x| x.replace("Z:", "").replace("\\", "/")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::umu_game_id_from;
+
+    #[test]
+    fn umu_game_id_uses_env_value() {
+        assert_eq!(umu_game_id_from(Some("umu-2316580".into())), "umu-2316580");
+    }
+
+    #[test]
+    fn umu_game_id_falls_back_when_unset_or_empty() {
+        assert_eq!(umu_game_id_from(None), "umu-0");
+        assert_eq!(umu_game_id_from(Some(String::new())), "umu-0");
+        assert_eq!(umu_game_id_from(Some("  ".into())), "umu-0");
+    }
 }

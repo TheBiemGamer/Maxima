@@ -17,6 +17,7 @@ use tokio::sync::{MutexGuard, RwLock};
 use super::{
     request::{
         account::handle_query_entitlements_request,
+        achievements::handle_query_achievements_request,
         auth::handle_auth_code_request,
         challenge::handle_challenge_response,
         config::handle_config_request,
@@ -432,6 +433,7 @@ impl Connection {
             QueryFriends handle_query_friends_request,
             QueryEntitlements handle_query_entitlements_request,
             QueryImage handle_query_image_request,
+            QueryAchievements handle_query_achievements_request,
             GetVoipStatus handle_voip_status_request,
             ShowIGOWindow handle_show_igo_window_request,
             SetDownloaderUtilization handle_set_downloader_util_request,
