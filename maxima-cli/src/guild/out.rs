@@ -176,7 +176,10 @@ mod tests {
             "https://cdn.ea.com/a/b.zip?Expires=123&Policy=p",
         ] {
             let out = scrub(&format!("downloading {url} now"));
-            assert_eq!(out, "downloading https://cdn.ea.com/a/b.zip?*** now", "{url}");
+            assert_eq!(
+                out, "downloading https://cdn.ea.com/a/b.zip?*** now",
+                "{url}"
+            );
         }
         let plain = "see https://example.com/page?lang=en";
         assert_eq!(scrub(plain), plain);

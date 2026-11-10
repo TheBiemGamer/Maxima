@@ -25,7 +25,10 @@ pub enum LoginEvent {
     /// Unscrubbed on purpose: the caller opens it. It carries `pc_sign` and the PKCE
     /// challenge, both single-use; it is never logged.
     LoginUrl(String),
-    LoggedIn { name: String, user_id: String },
+    LoggedIn {
+        name: String,
+        user_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -140,8 +143,11 @@ pub async fn login() -> i32 {
 
     emit(&LoginEvent::LoginUrl(url));
 
-    match tokio::time::timeout(LOGIN_TIMEOUT, wait_for_oauth_code_on(&listener, &mut context))
-        .await
+    match tokio::time::timeout(
+        LOGIN_TIMEOUT,
+        wait_for_oauth_code_on(&listener, &mut context),
+    )
+    .await
     {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
