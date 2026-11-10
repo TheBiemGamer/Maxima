@@ -133,7 +133,7 @@ impl PreDiPManifest {
     #[cfg(windows)]
     pub async fn run_touchup(&self, install_path: &PathBuf) -> Result<(), ManifestError> {
         let args = self.collect_touchup_args(install_path)?;
-        let path = install_path.join(&self.executable.file_path);
+        let path = install_path.join(remove_leading_slash(&self.executable.file_path));
         super::run_touchup_elevated(path, args).await
     }
 
